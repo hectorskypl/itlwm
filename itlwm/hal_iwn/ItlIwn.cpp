@@ -90,6 +90,15 @@ void ItlIwn::
 detach(IOPCIDevice *device)
 {
     struct _ifnet *ifp = &com.sc_ic.ic_ac.ac_if;
+    struct iwn_softc *sc = &com;
+    
+    for (int txq_i = 0; txq_i < nitems(sc->txq); txq_i++)
+        iwn_free_tx_ring(sc, &sc->txq[txq_i]);
+    iwn_free_rx_ring(sc, &sc->rxq);
+    iwn_free_sched(sc);
+    iwn_free_ict(sc);
+    iwn_free_kw(sc);
+    iwn_free_fwmem(sc);
     ieee80211_ifdetach(ifp);
     taskq_destroy(systq);
     releaseAll();
@@ -141,6 +150,7 @@ IOReturn ItlIwn::enable(IONetworkInterface *netif)
     XYLog("%s\n", __FUNCTION__);
     struct _ifnet *ifp = &com.sc_ic.ic_ac.ac_if;
     ifp->if_flags |= IFF_UP;
+    iwn_activate(&com, DVACT_RESUME);
     iwn_activate(&com, DVACT_WAKEUP);
     return kIOReturnSuccess;
 }
@@ -770,11 +780,23 @@ iwn_activate(struct iwn_softc *sc, int act)
             iwn_stop(ifp);
         break;
     case DVACT_WAKEUP:
-        task_add(systq, &sc->init_task);
+        iwn_wakeup(sc);
         break;
     }
 
     return 0;
+}
+
+void ItlIwn::
+iwn_wakeup(struct iwn_softc *sc)
+{
+    pcireg_t reg;
+
+    /* Clear device-specific "PCI retry timeout" register (41h). */
+    reg = pci_conf_read(sc->sc_pct, sc->sc_pcitag, 0x40);
+    if (reg & 0xff00)
+        pci_conf_write(sc->sc_pct, sc->sc_pcitag, 0x40, reg & ~0xff00);
+    task_add(systq, &sc->init_task);
 }
 
 void ItlIwn::
@@ -1285,9 +1307,12 @@ iwn_free_rx_ring(struct iwn_softc *sc, struct iwn_rx_ring *ring)
 //                data->map->dm_mapsize, BUS_DMASYNC_POSTREAD);
 //            bus_dmamap_unload(sc->sc_dmat, data->map);
             mbuf_freem(data->m);
+            data->m = NULL;
         }
-        if (data->map != NULL)
+        if (data->map != NULL) {
             bus_dmamap_destroy(sc->sc_dmat, data->map);
+            data->map = NULL;
+        }
     }
 }
 
@@ -1385,9 +1410,12 @@ iwn_free_tx_ring(struct iwn_softc *sc, struct iwn_tx_ring *ring)
 //                data->map->dm_mapsize, BUS_DMASYNC_POSTWRITE);
 //            bus_dmamap_unload(sc->sc_dmat, data->map);
             mbuf_freem(data->m);
+            data->m = NULL;
         }
-        if (data->map != NULL)
+        if (data->map != NULL) {
             bus_dmamap_destroy(sc->sc_dmat, data->map);
+            data->map = NULL;
+        }
     }
 }
 

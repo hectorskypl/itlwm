@@ -296,6 +296,9 @@ iwm_setup_ht_rates(struct iwm_softc *sc)
     memset(ic->ic_sup_mcs, 0, sizeof(ic->ic_sup_mcs));
     ic->ic_sup_mcs[0] = 0xff;        /* MCS 0-7 */
     
+    if (sc->support_ldpc)
+        ic->ic_htcaps |= IEEE80211_HTCAP_LDPC;
+    
     if (!iwm_mimo_enabled(sc))
         return;
     
@@ -434,6 +437,13 @@ iwm_reorder_timer_expired(void *arg)
     splx(s);
 }
 
+static inline uint8_t iwm_num_of_ant(uint8_t mask)
+{
+    return  !!((mask) & IWM_ANT_A) +
+        !!((mask) & IWM_ANT_B) +
+        !!((mask) & IWM_ANT_C);
+}
+
 void ItlIwm::
 iwm_setup_vht_rates(struct iwm_softc *sc)
 {
@@ -441,11 +451,14 @@ iwm_setup_vht_rates(struct iwm_softc *sc)
     uint8_t rx_ant, tx_ant;
     unsigned int max_ampdu_exponent = IEEE80211_VHTCAP_MAX_AMPDU_1024K;
     
+    if (ic->ic_userflags & IEEE80211_F_NOVHT)
+        return;
+    
     /* enable 11ac support */
     ic->ic_flags |= IEEE80211_F_VHTON;
     
-    rx_ant = iwm_fw_valid_rx_ant(sc);
-    tx_ant = iwm_fw_valid_tx_ant(sc);
+    rx_ant = iwm_num_of_ant(iwm_fw_valid_rx_ant(sc));
+    tx_ant = iwm_num_of_ant(iwm_fw_valid_tx_ant(sc));
     
     ic->ic_vhtcaps = IEEE80211_VHTCAP_SHORT_GI_80 |
     IEEE80211_VHTCAP_RXSTBC_1 |
@@ -459,7 +472,8 @@ iwm_setup_vht_rates(struct iwm_softc *sc)
     ic->ic_vhtcaps |= IEEE80211_VHTCAP_SUPP_CHAN_WIDTH_160MHZ |
             IEEE80211_VHTCAP_SHORT_GI_160;
     
-    ic->ic_vhtcaps |= IEEE80211_VHTCAP_RXLDPC;
+    if (sc->support_ldpc)
+        ic->ic_vhtcaps |= IEEE80211_VHTCAP_RXLDPC;
     if (!iwm_mimo_enabled(sc)) {
         rx_ant = 1;
         tx_ant = 1;
@@ -1121,6 +1135,8 @@ iwm_rx_tx_ba_notif(struct iwm_softc *sc, struct iwm_rx_packet *pkt, struct iwm_r
     if (qid != IWM_FIRST_AGG_TX_QUEUE + ba_notif->tid)
         return;
     
+    sc->sc_tx_timer = 0;
+    
     ba = &ni->ni_tx_ba[ba_notif->tid];
     if (ba->ba_state != IEEE80211_BA_AGREED)
         return;
@@ -1433,7 +1449,6 @@ iwm_rx_tx_cmd(struct iwm_softc *sc, struct iwm_rx_packet *pkt,
     int qid = cmd_hdr->qid;
     struct iwm_tx_ring *ring = &sc->txq[qid];
     struct iwm_tx_data *txd = &ring->data[idx];
-    struct iwm_node *in = txd->in;
     struct iwm_tx_resp *tx_resp = (struct iwm_tx_resp *)pkt->data;
     uint32_t ssn;
     uint32_t len = iwm_rx_packet_len(pkt);
@@ -1838,7 +1853,7 @@ iwm_tx(struct iwm_softc *sc, mbuf_t m, struct ieee80211_node *ni, int ac)
         tx->sec_ctl = 0;
     }
     
-    flags |= IWM_TX_CMD_FLG_BT_DIS;
+    flags |= (iwm_coex_tx_prio(sc, wh, ac) << IWM_TX_CMD_FLG_BT_PRIO_POS);
     if (!hasqos)
         flags |= IWM_TX_CMD_FLG_SEQ_CTL;
     
@@ -2228,6 +2243,13 @@ iwm_auth(struct iwm_softc *sc)
     else
         sc->sc_phyctxt[0].channel = in->in_ni.ni_chan;
     in->in_ni.ni_chw = IEEE80211_CHAN_WIDTH_20_NOHT;
+    in->in_ni.ni_flags &= ~(IEEE80211_NODE_HT |
+                            IEEE80211_NODE_QOS |
+                            IEEE80211_NODE_HT_SGI20 |
+                            IEEE80211_NODE_HT_SGI40 |
+                            IEEE80211_NODE_VHT |
+                            IEEE80211_NODE_VHT_SGI80 |
+                            IEEE80211_NODE_VHT_SGI160);
     err = iwm_phy_ctxt_cmd(sc, &sc->sc_phyctxt[0], 1, 1,
                            IWM_FW_CTXT_ACTION_MODIFY, 0);
     if (err) {
@@ -2724,7 +2746,7 @@ iwm_setrates(struct iwm_node *in, int async)
     struct iwm_lq_cmd lqcmd;
     struct ieee80211_rateset *rs = &ni->ni_rates;
     const struct ieee80211_ra_rate *ra_rate = ieee80211_ra_get_rateset(&in->in_rn, ic, ni, ni->ni_txmcs);
-    int i, ridx, ridx_min, ridx_max, j, sgi_ok = 0, mimo, tab = 0, is_40mhz = 0, is_80mhz = 0, is_160mhz = 0;
+    int i, ridx, ridx_min, ridx_max, j, sgi_ok = 0, mimo, tab = 0, is_40mhz = 0, is_80mhz = 0, is_160mhz = 0, ldpc = 0;
     struct iwm_host_cmd cmd = {
         .id = IWM_LQ_CMD,
         .len = { sizeof(lqcmd), },
@@ -2747,6 +2769,14 @@ iwm_setrates(struct iwm_node *in, int async)
     }
     
     sgi_ok = ra_rate->sgi;
+    
+    if (ni->ni_flags & IEEE80211_NODE_VHT) {
+        if ((ni->ni_vhtcaps & IEEE80211_VHTCAP_RXLDPC) && (ic->ic_vhtcaps & IEEE80211_VHTCAP_RXLDPC))
+            ldpc = 1;
+    } else if (ni->ni_flags & IEEE80211_NODE_HT) {
+        if ((ni->ni_htcaps & IEEE80211_HTCAP_LDPC) && (ic->ic_htcaps & IEEE80211_HTCAP_LDPC))
+            ldpc = 1;
+    }
     
     /*
      * Fill the LQ rate selection table with legacy and/or HT rates
@@ -2787,6 +2817,8 @@ iwm_setrates(struct iwm_node *in, int async)
                         tab |= IWM_RATE_MCS_CHAN_WIDTH_160;
                     if (sgi_ok)
                         tab |= IWM_RATE_MCS_SGI_MSK;
+                    if (ldpc)
+                        tab |= IWM_RATE_MCS_LDPC_MSK;
                     break;
                 }
             }
@@ -2808,6 +2840,8 @@ iwm_setrates(struct iwm_node *in, int async)
                     /* TODO: If we enable 40mhz Tx rate in 2.4ghz band, the data will all sent fail */
                     if (is_40mhz && IEEE80211_IS_CHAN_5GHZ(ni->ni_chan))
                         tab |= IWM_RATE_MCS_CHAN_WIDTH_40;
+                    if (ldpc)
+                        tab |= IWM_RATE_MCS_LDPC_MSK;
                     break;
                 }
             }
@@ -2854,7 +2888,7 @@ iwm_setrates(struct iwm_node *in, int async)
     lqcmd.single_stream_ant_msk = IWM_ANT_A;
     lqcmd.dual_stream_ant_msk = IWM_ANT_AB;
     
-    lqcmd.agg_time_limit = htole16(4000);    /* 4ms */
+    lqcmd.agg_time_limit = htole16(iwm_coex_agg_time_limit(sc));
     lqcmd.agg_disable_start_th = 3;
     lqcmd.agg_frame_cnt_limit = 0x3f;
     
@@ -2942,7 +2976,7 @@ iwm_ampdu_tx_start(struct ieee80211com *ic, struct ieee80211_node *ni, uint8_t t
     ItlIwm *that = container_of(sc, ItlIwm, com);
     int qid = sc->first_agg_txq + tid;
     
-    if ((sc->agg_queue_mask & (1 << qid)) || qid < IWM_FIRST_AGG_TX_QUEUE || qid > IWM_LAST_AGG_TX_QUEUE) {
+    if (qid < IWM_FIRST_AGG_TX_QUEUE || qid > IWM_LAST_AGG_TX_QUEUE) {
         XYLog("%s tx agg refused. qid=%d tid=%d\n", __FUNCTION__, qid, tid);
         return ENOSPC;
     }
@@ -4630,6 +4664,7 @@ iwm_attach(struct iwm_softc *sc, struct pci_attach_args *pa)
             sc->sc_fwdmasegsz = IWM_FWDMASEGSZ;
             sc->sc_nvm_max_section_size = 16384;
             sc->nvm_type = IWM_NVM;
+            sc->support_ldpc = 0;
             break;
         case PCI_PRODUCT_INTEL_WL_3165_1:
         case PCI_PRODUCT_INTEL_WL_3165_2:
@@ -4639,6 +4674,7 @@ iwm_attach(struct iwm_softc *sc, struct pci_attach_args *pa)
             sc->sc_fwdmasegsz = IWM_FWDMASEGSZ;
             sc->sc_nvm_max_section_size = 16384;
             sc->nvm_type = IWM_NVM;
+            sc->support_ldpc = 0;
             break;
         case PCI_PRODUCT_INTEL_WL_3168_1:
             sc->sc_fwname = "iwm-3168-29";
@@ -4647,6 +4683,7 @@ iwm_attach(struct iwm_softc *sc, struct pci_attach_args *pa)
             sc->sc_fwdmasegsz = IWM_FWDMASEGSZ;
             sc->sc_nvm_max_section_size = 16384;
             sc->nvm_type = IWM_NVM_SDP;
+            sc->support_ldpc = 0;
             break;
         case PCI_PRODUCT_INTEL_WL_7260_1:
         case PCI_PRODUCT_INTEL_WL_7260_2:
@@ -4656,6 +4693,7 @@ iwm_attach(struct iwm_softc *sc, struct pci_attach_args *pa)
             sc->sc_fwdmasegsz = IWM_FWDMASEGSZ;
             sc->sc_nvm_max_section_size = 16384;
             sc->nvm_type = IWM_NVM;
+            sc->support_ldpc = 0;
             break;
         case PCI_PRODUCT_INTEL_WL_7265_1:
         case PCI_PRODUCT_INTEL_WL_7265_2:
@@ -4665,6 +4703,7 @@ iwm_attach(struct iwm_softc *sc, struct pci_attach_args *pa)
             sc->sc_fwdmasegsz = IWM_FWDMASEGSZ;
             sc->sc_nvm_max_section_size = 16384;
             sc->nvm_type = IWM_NVM;
+            sc->support_ldpc = 1;
             break;
         case PCI_PRODUCT_INTEL_WL_8260_1:
         case PCI_PRODUCT_INTEL_WL_8260_2:
@@ -4674,6 +4713,7 @@ iwm_attach(struct iwm_softc *sc, struct pci_attach_args *pa)
             sc->sc_fwdmasegsz = IWM_FWDMASEGSZ_8000;
             sc->sc_nvm_max_section_size = 32768;
             sc->nvm_type = IWM_NVM_EXT;
+            sc->support_ldpc = 1;
             break;
         case PCI_PRODUCT_INTEL_WL_8265_1:
             sc->sc_fwname = "iwm-8265-34";
@@ -4682,6 +4722,7 @@ iwm_attach(struct iwm_softc *sc, struct pci_attach_args *pa)
             sc->sc_fwdmasegsz = IWM_FWDMASEGSZ_8000;
             sc->sc_nvm_max_section_size = 32768;
             sc->nvm_type = IWM_NVM_EXT;
+            sc->support_ldpc = 1;
             break;
         case PCI_PRODUCT_INTEL_WL_9260_1:
             sc->sc_fwname = "iwm-9260-34";
@@ -4690,6 +4731,7 @@ iwm_attach(struct iwm_softc *sc, struct pci_attach_args *pa)
             sc->sc_fwdmasegsz = IWM_FWDMASEGSZ_8000;
             sc->sc_nvm_max_section_size = 32768;
             sc->sc_mqrx_supported = 1;
+            sc->support_ldpc = 1;
             break;
         case PCI_PRODUCT_INTEL_WL_9560_1:
         case PCI_PRODUCT_INTEL_WL_9560_2:
@@ -4714,6 +4756,7 @@ iwm_attach(struct iwm_softc *sc, struct pci_attach_args *pa)
             sc->sc_nvm_max_section_size = 32768;
             sc->sc_mqrx_supported = 1;
             sc->sc_integrated = 1;
+            sc->support_ldpc = 1;
             break;
         default:
             XYLog("%s: unknown adapter type\n", DEVNAME(sc));
@@ -5110,12 +5153,19 @@ iwm_resume(struct iwm_softc *sc)
     reg = pci_conf_read(sc->sc_pct, sc->sc_pcitag, 0x40);
     pci_conf_write(sc->sc_pct, sc->sc_pcitag, 0x40, reg & ~0xff00);
     
-    /* reconfigure the MSI-X mapping to get the correct IRQ for rfkill */
-    iwm_conf_msix_hw(sc, 0);
-    
+    if (!sc->sc_msix) {
+        /* Hardware bug workaround. */
+        reg = pci_conf_read(sc->sc_pct, sc->sc_pcitag,
+                            PCI_COMMAND_STATUS_REG);
+        if (reg & PCI_COMMAND_INTERRUPT_DISABLE)
+            reg &= ~PCI_COMMAND_INTERRUPT_DISABLE;
+        pci_conf_write(sc->sc_pct, sc->sc_pcitag,
+                       PCI_COMMAND_STATUS_REG, reg);
+    }
+
     iwm_enable_rfkill_int(sc);
     iwm_check_rfkill(sc);
-    
+
     return iwm_prepare_card_hw(sc);
 }
 

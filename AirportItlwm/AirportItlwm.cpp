@@ -29,6 +29,7 @@ bool AirportItlwm::init(OSDictionary *properties)
     bool ret = super::init(properties);
     awdlSyncEnable = true;
     power_state = 0;
+    memset(geo_location_cc, 0, sizeof(geo_location_cc));
     return ret;
 }
 
@@ -342,6 +343,7 @@ createMediumTables(const IONetworkMedium **primary)
 
 bool AirportItlwm::start(IOService *provider)
 {
+    int boot_value = 0;
     if (!super::start(provider)) {
         return false;
     }
@@ -392,6 +394,12 @@ bool AirportItlwm::start(IOService *provider)
     }
     fHalService->initWithController(this, _fWorkloop, _fCommandGate);
     fHalService->get80211Controller()->ic_event_handler = eventHandler;
+    
+    if (PE_parse_boot_argn("-novht", &boot_value, sizeof(boot_value)))
+        fHalService->get80211Controller()->ic_userflags |= IEEE80211_F_NOVHT;
+    if (PE_parse_boot_argn("-noht40", &boot_value, sizeof(boot_value)))
+        fHalService->get80211Controller()->ic_userflags |= IEEE80211_F_NOHT40;
+    
     if (!fHalService->attach(pciNub)) {
         XYLog("attach fail\n");
         super::stop(pciNub);
@@ -640,6 +648,18 @@ IOReturn AirportItlwm::getHardwareAddress(IOEthernetAddress *addrP)
         IEEE80211_ADDR_COPY(addrP, fHalService->get80211Controller()->ic_myaddr);
         return kIOReturnSuccess;
     }
+}
+
+IOReturn AirportItlwm::setHardwareAddress(const IOEthernetAddress *addrP)
+{
+    if (!fNetIf || !addrP)
+        return kIOReturnError;
+    if_setlladdr(&fHalService->get80211Controller()->ic_ac.ac_if, addrP->bytes);
+    if (fHalService->get80211Controller()->ic_state > IEEE80211_S_INIT) {
+        fHalService->disable(fNetIf);
+        fHalService->enable(fNetIf);
+    }
+    return kIOReturnSuccess;
 }
 
 IOReturn AirportItlwm::getHardwareAddressForInterface(

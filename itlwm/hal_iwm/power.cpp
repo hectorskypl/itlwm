@@ -261,6 +261,8 @@ iwm_add_sta_cmd(struct iwm_softc *sc, struct iwm_node *in, int update, unsigned 
     int err;
     uint32_t status;
     size_t cmdsize;
+    uint32_t aggsize = 0;
+    uint32_t max_aggsize = (IWM_STA_FLG_MAX_AGG_SIZE_4M >> IWM_STA_FLG_MAX_AGG_SIZE_SHIFT);
     struct ieee80211com *ic = &sc->sc_ic;
     
     if (!update && (sc->sc_flags & IWM_FLAG_STA_ACTIVE)) {
@@ -337,9 +339,17 @@ iwm_add_sta_cmd(struct iwm_softc *sc, struct iwm_node *in, int update, unsigned 
         
         if (iwm_mimo_enabled(sc) && ic->ic_bss->ni_rx_nss > 1)
             add_sta_cmd.station_flags |= htole32(IWM_STA_FLG_MIMO_EN_MIMO2);
+        else
+            add_sta_cmd.station_flags |= htole32(IWM_STA_FLG_MIMO_EN_SISO);
         
-        if (in->in_ni.ni_flags & IEEE80211_NODE_VHT)
-            add_sta_cmd.station_flags |= htole32(((ic->ic_vhtcaps & IEEE80211_VHTCAP_MAX_A_MPDU_LENGTH_EXPONENT_MASK) >> IEEE80211_VHTCAP_MAX_A_MPDU_LENGTH_EXPONENT_SHIFT) << IWM_STA_FLG_MAX_AGG_SIZE_SHIFT);
+        if (in->in_ni.ni_flags & IEEE80211_NODE_VHT) {
+            aggsize = in->in_ni.ni_vhtcaps &
+            IEEE80211_VHTCAP_MAX_A_MPDU_LENGTH_EXPONENT_MASK;
+            aggsize >>=
+            IEEE80211_VHTCAP_MAX_A_MPDU_LENGTH_EXPONENT_SHIFT;
+            add_sta_cmd.station_flags |=
+            htole32(min(max_aggsize, aggsize) << IWM_STA_FLG_MAX_AGG_SIZE_SHIFT);
+        }
         else if (in->in_ni.ni_flags & IEEE80211_NODE_HT)
             add_sta_cmd.station_flags |= htole32(IWM_STA_FLG_MAX_AGG_SIZE_64K);
         

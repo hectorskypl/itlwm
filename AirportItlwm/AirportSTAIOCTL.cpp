@@ -132,7 +132,7 @@ SInt32 AirportItlwm::apple80211Request(unsigned int request_type,
             IOCTL_GET(request_type, ASSOCIATION_STATUS, apple80211_assoc_status_data);
             break;
         case APPLE80211_IOC_COUNTRY_CODE:  // 51
-            IOCTL_GET(request_type, COUNTRY_CODE, apple80211_country_code_data);
+            IOCTL(request_type, COUNTRY_CODE, apple80211_country_code_data);
             break;
         case APPLE80211_IOC_RADIO_INFO:
             IOCTL_GET(request_type, RADIO_INFO, apple80211_radio_info_data);
@@ -484,8 +484,6 @@ getRATE(OSObject *object, struct apple80211_rate_data *rd)
                     index += 12;
                     break;
 
-                case IEEE80211_CHAN_WIDTH_20_NOHT:
-                case IEEE80211_CHAN_WIDTH_20:    
                 default:
                     break;
             }
@@ -528,6 +526,10 @@ IOReturn AirportItlwm::
 setROAM_PROFILE(OSObject *object, struct apple80211_roam_profile_band_data *data)
 {
     XYLog("%s cnt=%d flags=%d\n", __FUNCTION__, data->profile_cnt, data->flags);
+    for (int i = 0; i < data->profile_cnt; i++) {
+        struct apple80211_roam_profile *bd = &data->profiles[i];
+        XYLog("%s %d ROAM_PROF_BACKOFF_MULTIPLIER: %d, ROAM_PROF_FULLSCAN_PERIOD: %d, ROAM_PROF_INIT_SCAN_PERIOD: %d, ROAM_PROF_MAX_SCAN_PERIOD: %d, ROAM_PROF_NFSCAN: %d, ROAM_PROF_ROAM_DELTA: %d, ROAM_PROF_ROAM_FLAGS:%d, ROAM_PROF_ROAM_TRIGGER: %d, ROAM_PROF_RSSI_BOOST_DELTA: %d, ROAM_PROF_RSSI_BOOST_THRESH: %d, ROAM_PROF_RSSI_LOWER: %d\n", __FUNCTION__, i, bd->backoff_multiplier, bd->full_scan_period, bd->init_scan_period, bd->max_scan_period, bd->nfscan, bd->delta, bd->flags, bd->trigger, bd->rssi_boost_delta, bd->rssi_boost_thresh, bd->rssi_lower);
+    }
     if (roamProfile != NULL) {
         IOFree(roamProfile, sizeof(struct apple80211_roam_profile_band_data));
     }
@@ -662,7 +664,7 @@ getMCS_VHT(OSObject *object, struct apple80211_mcs_vht_data *data)
     }
     memset(data, 0, sizeof(struct apple80211_mcs_vht_data));
     data->version = APPLE80211_VERSION;
-    data->guard_interval = (ieee80211_node_supports_vht_sgi80(ic->ic_bss) || ieee80211_node_supports_vht_sgi160(ic->ic_bss)) ? 400 : 800;
+    data->guard_interval = (ieee80211_node_supports_vht_sgi80(ic->ic_bss) || ieee80211_node_supports_vht_sgi160(ic->ic_bss)) ? APPLE80211_GI_SHORT : APPLE80211_GI_LONG;
     data->index = ic->ic_bss->ni_txmcs;
     data->nss = fHalService->getDriverInfo()->getTxNSS();
     switch (ic->ic_bss->ni_chw) {
@@ -892,8 +894,7 @@ setPOWER(OSObject *object,
                          struct apple80211_power_data *pd)
 {
     if (pd->num_radios > 0) {
-        bool isRunning = (fHalService->get80211Controller()->ic_ac.ac_if.if_flags & (IFF_UP | IFF_RUNNING)) ==
-        (IFF_UP | IFF_RUNNING);
+        bool isRunning = (fHalService->get80211Controller()->ic_ac.ac_if.if_flags & (IFF_UP | IFF_RUNNING)) != 0;
         if (pd->power_state[0] == 0) {
             if (isRunning) {
                 net80211_ifstats(fHalService->get80211Controller());
@@ -935,7 +936,7 @@ setASSOCIATE(OSObject *object,
         return kIOReturnSuccess;
     }
 
-    if (ad->ad_mode != 1) {
+    if (ad->ad_mode != APPLE80211_AP_MODE_IBSS) {
         disassocIsVoluntary = false;
         auth_type_data.version = APPLE80211_VERSION;
         auth_type_data.authtype_upper = ad->ad_auth_upper;
@@ -1139,11 +1140,25 @@ IOReturn AirportItlwm::
 getCOUNTRY_CODE(OSObject *object,
                                 struct apple80211_country_code_data *cd)
 {
-    char cc[3];
+    char user_override_cc[3];
+    const char *cc_fw = fHalService->getDriverInfo()->getFirmwareCountryCode();
+    
     cd->version = APPLE80211_VERSION;
-    memset(cc, 0, sizeof(cc));
-    PE_parse_boot_argn("itlwm_cc", cc, 3);
-    strncpy((char*)cd->cc, cc[0] == 0 ? fHalService->getDriverInfo()->getFirmwareCountryCode() : cc, sizeof(cd->cc));
+    memset(user_override_cc, 0, sizeof(user_override_cc));
+    PE_parse_boot_argn("itlwm_cc", user_override_cc, 3);
+    /* user_override_cc > firmware_cc > geo_location_cc */
+    strncpy((char*)cd->cc, user_override_cc[0] ? user_override_cc : ((cc_fw[0] == 'Z' && cc_fw[1] == 'Z' && geo_location_cc[0]) ? geo_location_cc : cc_fw), sizeof(cd->cc));
+    return kIOReturnSuccess;
+}
+
+IOReturn AirportItlwm::
+setCOUNTRY_CODE(OSObject *object, struct apple80211_country_code_data *data)
+{
+    XYLog("%s cc=%s\n", __FUNCTION__, data->cc);
+    if (data->cc[0] != 120 && data->cc[0] != 88) {
+        memcpy(geo_location_cc, data->cc, sizeof(geo_location_cc));
+        fNetIf->postMessage(APPLE80211_M_COUNTRY_CODE_CHANGED);
+    }
     return kIOReturnSuccess;
 }
 

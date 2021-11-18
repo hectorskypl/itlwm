@@ -488,12 +488,6 @@ void
 ieee80211_setkeysdone(struct ieee80211com *ic)
 {
 	u_int8_t kid;
-    
-    /*
-     * Discard frames buffered for power-saving which were encrypted with
-     * the old group key. Clients are no longer able to decrypt them.
-     */
-    mq_purge(&ic->ic_bss->ni_savedq);
 
 	/* install GTK */
 	kid = (ic->ic_def_txkey == 1) ? 2 : 1;
@@ -637,7 +631,7 @@ ieee80211_ht_negotiate(struct ieee80211com *ic, struct ieee80211_node *ni)
         ni->ni_flags |= IEEE80211_NODE_HT_SGI20;
     }
     
-    if (((ic->ic_htcaps & IEEE80211_HTCAP_40INTOLERANT) || (ni->ni_htcaps & IEEE80211_HTCAP_40INTOLERANT))
+    if (((ic->ic_htcaps & IEEE80211_HTCAP_40INTOLERANT) || (ni->ni_htcaps & IEEE80211_HTCAP_40INTOLERANT) || (ic->ic_userflags & IEEE80211_F_NOHT40))
         && IEEE80211_IS_CHAN_2GHZ(ni->ni_chan)) {
         ni->ni_chw = IEEE80211_CHAN_WIDTH_20;
     } else if ((ni->ni_htcaps & IEEE80211_HTCAP_CBW20_40) && IEEE80211_IS_CHAN_HT40(ni->ni_chan) && (ic->ic_htcaps & IEEE80211_HTCAP_CBW20_40)) {
@@ -671,8 +665,14 @@ ieee80211_vht_negotiate(struct ieee80211com *ic, struct ieee80211_node *ni)
     if ((ic->ic_modecaps & (1 << IEEE80211_MODE_11AC)) == 0)
         return;
 
+    if (ic->ic_userflags & IEEE80211_F_NOVHT)
+        return;
+
     /* Check if VHT support has been explicitly disabled. */
     if ((ic->ic_flags & IEEE80211_F_VHTON) == 0)
+        return;
+    
+    if (!IEEE80211_IS_CHAN_5GHZ(ni->ni_chan))
         return;
     
     if (!ieee80211_node_supports_vht(ni)) {
