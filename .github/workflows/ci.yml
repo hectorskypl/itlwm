@@ -55,19 +55,19 @@ jobs:
           cd -
 
       - name: Upload to Artifacts itlwm
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v4
         with:
           name: itlwm
           path: "${{ env.BUILD_OUTPUT }}/itlwm-*.zip"
 
       - name: Upload to Artifacts AirportItlwm
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v4
         with:
           name: AirportItlwm
           path: "${{ env.BUILD_OUTPUT }}/AirportItlwm-*.zip"
 
       - name: Upload to Artifacts AirportItlwm-legacy
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v4
         with:
           name: AirportItlwm-legacy
           path: "${{ env.BUILD_LEGACY_OUTPUT }}/AirportItlwm-*.zip"
