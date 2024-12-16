@@ -110,7 +110,7 @@ jobs:
         path: "${{ env.BUILD_OUTPUT }}/AirportItlwm-*.zip"
 
     - name: Upload to Artifacts AirportItlwm-legacy
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v4
       with:
         name: AirportItlwm-legacy
         path: "${{ env.BUILD_LEGACY_OUTPUT }}/AirportItlwm-*.zip"
